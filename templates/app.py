@@ -14,6 +14,7 @@ st.set_page_config(
     layout="wide"
 )
 
+
 # -----------------------------
 # SESSION STATE
 # -----------------------------
