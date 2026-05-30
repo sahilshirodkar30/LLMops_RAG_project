@@ -30,11 +30,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ----------------------------
 # Static and templates
+# ----------------------------
 BASE_DIR = Path(__file__).resolve().parent
 static_dir = BASE_DIR / "static"
 templates_dir = BASE_DIR / "templates"
-app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+# Mount static only if folder exists
+if static_dir.exists():
+    app.mount(
+        "/static",
+        StaticFiles(directory=str(static_dir)),
+        name="static"
+    )
+
 templates = Jinja2Templates(directory=str(templates_dir))
 
 
@@ -49,6 +59,7 @@ SESSIONS: Dict[str, List[dict]] = {}
 # ----------------------------
 class FastAPIFileAdapter:
     """Adapt FastAPI UploadFile to a simple object with .name and .getbuffer()."""
+
     def __init__(self, uf: UploadFile):
         self._uf = uf
         self.name = uf.filename or "file"
@@ -86,22 +97,30 @@ def health() -> Dict[str, str]:
 
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(
+        "index.html",
+        {"request": request}
+    )
 
 
 @app.post("/upload", response_model=UploadResponse)
 async def upload(files: List[UploadFile] = File(...)) -> UploadResponse:
     if not files:
-        raise HTTPException(status_code=400, detail="No files uploaded")
+        raise HTTPException(
+            status_code=400,
+            detail="No files uploaded"
+        )
 
     try:
-        # Wrap FastAPI files to preserve filename/ext and provide a read buffer
-        wrapped_files = [FastAPIFileAdapter(f) for f in files]
+        # Wrap FastAPI files to preserve filename/ext
+        wrapped_files = [
+            FastAPIFileAdapter(f) for f in files
+        ]
 
         ingestor = ChatIngestor(use_session_dirs=True)
         session_id = ingestor.session_id
 
-        # Save, load, split, embed, and write FAISS index with MMR
+        # Save, load, split, embed, and write FAISS index
         ingestor.built_retriver(
             uploaded_files=wrapped_files,
             search_type="mmr",
@@ -109,29 +128,51 @@ async def upload(files: List[UploadFile] = File(...)) -> UploadResponse:
             lambda_mult=0.5
         )
 
-        # Initialize empty history for this session
+        # Initialize empty history
         SESSIONS[session_id] = []
 
-        return UploadResponse(session_id=session_id, indexed=True, message="Indexing complete with MMR")
+        return UploadResponse(
+            session_id=session_id,
+            indexed=True,
+            message="Indexing complete with MMR"
+        )
+
     except DocumentPortalException as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Upload failed: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Upload failed: {e}"
+        )
 
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest) -> ChatResponse:
     session_id = req.session_id
     message = req.message.strip()
+
     if not session_id or session_id not in SESSIONS:
-        raise HTTPException(status_code=400, detail="Invalid or expired session_id. Re-upload documents.")
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid or expired session_id. Re-upload documents."
+        )
+
     if not message:
-        raise HTTPException(status_code=400, detail="Message cannot be empty")
+        raise HTTPException(
+            status_code=400,
+            detail="Message cannot be empty"
+        )
 
     try:
-        # Build RAG and load retriever from persisted FAISS with MMR
+        # Build RAG and load retriever
         rag = ConversationalRAG(session_id=session_id)
+
         index_path = f"faiss_index/{session_id}"
+
         rag.load_retriever_from_faiss(
             index_path=index_path,
             search_type="mmr",
@@ -139,33 +180,66 @@ async def chat(req: ChatRequest) -> ChatResponse:
             lambda_mult=0.5
         )
 
-        # Use simple in-memory history and convert to BaseMessage list
+        # Convert simple history → LangChain messages
         simple = SESSIONS.get(session_id, [])
         lc_history = []
+
         for m in simple:
             role = m.get("role")
             content = m.get("content", "")
-            if role == "user":
-                lc_history.append(HumanMessage(content=content))
-            elif role == "assistant":
-                lc_history.append(AIMessage(content=content))
 
-        answer = rag.invoke(message, chat_history=lc_history)
+            if role == "user":
+                lc_history.append(
+                    HumanMessage(content=content)
+                )
+
+            elif role == "assistant":
+                lc_history.append(
+                    AIMessage(content=content)
+                )
+
+        answer = rag.invoke(
+            message,
+            chat_history=lc_history
+        )
 
         # Update history
-        simple.append({"role": "user", "content": message})
-        simple.append({"role": "assistant", "content": answer})
+        simple.append({
+            "role": "user",
+            "content": message
+        })
+
+        simple.append({
+            "role": "assistant",
+            "content": answer
+        })
+
         SESSIONS[session_id] = simple
 
         return ChatResponse(answer=answer)
+
     except DocumentPortalException as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Chat failed: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Chat failed: {e}"
+        )
 
 
-# Uvicorn entrypoint for `python main.py` (optional)
+# ----------------------------
+# Uvicorn entrypoint
+# ----------------------------
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")), reload=True)
 
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", "8000")),
+        reload=True
+    )
